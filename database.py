@@ -1,10 +1,13 @@
-import psycopg2
+import sqlite3
+import os
 import hashlib
-import streamlit as st
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "system.db")
 
 
 def get_connection():
-    return psycopg2.connect(st.secrets["DATABASE_URL"])
+    return sqlite3.connect(DB_PATH)
 
 
 def hash_password(password):
@@ -12,12 +15,16 @@ def hash_password(password):
 
 
 def create_tables():
+
     conn = get_connection()
     cursor = conn.cursor()
 
+    cursor.execute("DROP TABLE IF EXISTS students")
+    cursor.execute("DROP TABLE IF EXISTS users")
+
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
+    CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         email TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
@@ -26,8 +33,8 @@ def create_tables():
     """)
 
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS students (
-        id SERIAL PRIMARY KEY,
+    CREATE TABLE students (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         student_name TEXT,
         roll_no TEXT UNIQUE,
         attendance REAL,
@@ -40,18 +47,32 @@ def create_tables():
     )
     """)
 
-    # Insert default users if not exist
-    cursor.execute("""
-        INSERT INTO users (name, email, password, role)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (email) DO NOTHING
-    """, ("Admin User", "admin@gmail.com", hash_password("admin123"), "admin"))
+    conn.commit()
+    conn.close()
+
+
+def insert_default_users():
+
+    conn = get_connection()
+    cursor = conn.cursor()
 
     cursor.execute("""
         INSERT INTO users (name, email, password, role)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (email) DO NOTHING
-    """, ("Faculty User", "faculty@gmail.com", hash_password("faculty123"), "faculty"))
+        VALUES (?, ?, ?, ?)
+    """, ("Admin User", "admin@gmail.com",
+          hash_password("admin123"), "admin"))
+
+    cursor.execute("""
+        INSERT INTO users (name, email, password, role)
+        VALUES (?, ?, ?, ?)
+    """, ("Faculty User", "faculty@gmail.com",
+          hash_password("faculty123"), "faculty"))
 
     conn.commit()
     conn.close()
+
+
+if __name__ == "__main__":
+    create_tables()
+    insert_default_users()
+    print("Database created successfully.")

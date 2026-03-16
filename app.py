@@ -1,15 +1,17 @@
 import streamlit as st
-import psycopg2
+import sqlite3
 import joblib
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import os
 import hashlib
-from database import create_tables
+
+# ---------- PATH ----------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "system.db")
 
 # ---------- LOAD MODEL ----------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 model_data = joblib.load(os.path.join(BASE_DIR, "model.pkl"))
 model = model_data["model"]
 FEATURE_COLUMNS = model_data["features"]
@@ -27,15 +29,22 @@ div.stButton > button:hover {background-color:#0072ff;transform:scale(1.05);}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- INIT DB ----------
-create_tables()
-
 # ---------- HELPERS ----------
 def get_connection():
-    return psycopg2.connect(st.secrets["DATABASE_URL"])
+    return sqlite3.connect(DB_PATH)
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
+
+def calculate_risk_score(data):
+    score = (
+        (100 - data[0]) * 0.25 +
+        (100 - data[2]) * 0.20 +
+        (100 - data[3]) * 0.25 +
+        (100 - data[4]) * 0.20 +
+        (10 - data[5]) * 5 * 0.10
+    )
+    return round(score, 2)
 
 # ---------- SESSION ----------
 if "logged_in" not in st.session_state:
@@ -55,7 +64,7 @@ if not st.session_state.logged_in:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM users WHERE email=%s AND password=%s",
+            "SELECT * FROM users WHERE email=? AND password=?",
             (username, hash_password(password))
         )
         user = cursor.fetchone()
@@ -108,11 +117,16 @@ else:
                              "Medium":"orange",
                              "Low":"green"
                          })
+
             st.plotly_chart(fig)
 
             st.subheader("Feature Importance")
             importance = model.feature_importances_
-            fig2 = px.bar(x=importance, y=FEATURE_COLUMNS, orientation='h')
+            fig2 = px.bar(
+                x=importance,
+                y=FEATURE_COLUMNS,
+                orientation='h'
+            )
             st.plotly_chart(fig2)
 
         else:
@@ -123,12 +137,15 @@ else:
 
         st.header("👨🏫 Faculty Dashboard")
 
+        # =========================
+        # ADD STUDENT SECTION
+        # =========================
         st.subheader("➕ Add Student")
 
         if "clear_trigger" not in st.session_state:
             st.session_state.clear_trigger = False
 
-        col1, col2 = st.columns(2)
+            col1, col2 = st.columns(2)
 
         with col1:
             name = st.text_input("Student Name", key="name")
@@ -142,8 +159,9 @@ else:
             prev = st.number_input("Previous Sem Score", 0.0, 100.0, key="prev")
             part = st.number_input("Participation Score", 0.0, 10.0, key="part")
 
-        btn1, btn2 = st.columns(2)
+            btn1, btn2 = st.columns(2)
 
+        # -------- SAVE --------
         if btn1.button("Predict & Save"):
 
             input_data = np.array([[attendance, study, assign, mid, prev, part]])
@@ -157,29 +175,37 @@ else:
                 (student_name, roll_no, attendance, study_hours,
                 assignment_score, mid_exam_score,
                 previous_sem_score, participation_score, risk_level)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (name, roll, attendance, study, assign, mid, prev, part, prediction))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (name, roll, attendance, study,
+                assign, mid, prev, part, prediction))
 
             cursor.execute("""
-                INSERT INTO users (name, email, password, role)
-                VALUES (%s, %s, %s, 'student')
-                ON CONFLICT (email) DO NOTHING
-            """, (name, roll, hash_password("Student123")))
+                INSERT OR IGNORE INTO users (name, email, password, role)
+                VALUES (?, ?, ?, 'student')
+                """, (name, roll, hash_password("Student123")))
 
             conn.commit()
             conn.close()
 
             st.success("Student Saved Successfully")
 
+            # Clear fields
             for key in ["name","roll","attendance","study","assign","mid","prev","part"]:
                 st.session_state[key] = ""
+
             st.rerun()
 
+        # -------- CLEAR --------
         if btn2.button("Clear"):
+
             for key in ["name","roll","attendance","study","assign","mid","prev","part"]:
                 st.session_state[key] = ""
+
             st.rerun()
 
+        # =========================
+        # STUDENT TABLE SECTION
+        # =========================
         st.markdown("---")
         st.subheader("📋 Student Records")
 
@@ -195,6 +221,7 @@ else:
             st.subheader("✏ Edit / Delete Student")
 
             selected_id = st.selectbox("Select Student ID", df["id"])
+
             student = df[df["id"] == selected_id].iloc[0]
 
             colA, colB = st.columns(2)
@@ -213,33 +240,42 @@ else:
 
             col_update, col_delete = st.columns(2)
 
+            # -------- UPDATE --------
             if col_update.button("Update Student"):
 
-                input_data = np.array([[new_att, new_study, new_assign, new_mid, new_prev, new_part]])
+                input_data = np.array([[new_att, new_study, new_assign,
+                                        new_mid, new_prev, new_part]])
+
                 prediction = model.predict(input_data)[0]
 
                 conn = get_connection()
                 cursor = conn.cursor()
+
                 cursor.execute("""
                     UPDATE students
-                    SET student_name=%s, roll_no=%s, attendance=%s, study_hours=%s,
-                        assignment_score=%s, mid_exam_score=%s,
-                        previous_sem_score=%s, participation_score=%s, risk_level=%s
-                    WHERE id=%s
+                    SET student_name=?, roll_no=?, attendance=?, study_hours=?,
+                        assignment_score=?, mid_exam_score=?,
+                        previous_sem_score=?, participation_score=?, risk_level=?
+                    WHERE id=?
                 """, (new_name, new_roll, new_att, new_study,
-                      new_assign, new_mid, new_prev, new_part, prediction, selected_id))
+                      new_assign, new_mid, new_prev,
+                    new_part, prediction, selected_id))
+
                 conn.commit()
                 conn.close()
 
                 st.success("Student Updated Successfully")
                 st.rerun()
 
+            # -------- DELETE --------
             if col_delete.button("Delete Student"):
 
                 conn = get_connection()
                 cursor = conn.cursor()
-                cursor.execute("DELETE FROM students WHERE id=%s", (selected_id,))
-                cursor.execute("DELETE FROM users WHERE email=%s", (student["roll_no"],))
+
+                cursor.execute("DELETE FROM students WHERE id=?", (selected_id,))
+                cursor.execute("DELETE FROM users WHERE email=?", (student["roll_no"],))
+
                 conn.commit()
                 conn.close()
 
@@ -255,7 +291,7 @@ else:
         st.header("🎓 Student Dashboard")
 
         conn = get_connection()
-        df = pd.read_sql("SELECT * FROM students WHERE roll_no=%s",
+        df = pd.read_sql("SELECT * FROM students WHERE roll_no=?",
                          conn, params=(username,))
         conn.close()
 
@@ -265,6 +301,7 @@ else:
 
             st.success(f"Welcome {student['student_name']}")
 
+            # ================= METRICS =================
             col1, col2, col3 = st.columns(3)
             col1.metric("Attendance", f"{student['attendance']}%")
             col2.metric("Study Hours", student["study_hours"])
@@ -275,6 +312,7 @@ else:
             col5.metric("Previous Sem", student["previous_sem_score"])
             col6.metric("Participation", student["participation_score"])
 
+            # ================= PERFORMANCE GRAPH =================
             st.subheader("📈 Academic Trend")
             trend_data = [
                 student["assignment_score"],
@@ -283,11 +321,14 @@ else:
             ]
             st.line_chart(trend_data)
 
+            # ================= RISK LEVEL =================
             st.subheader("📊 Risk Level")
             risk = student["risk_level"]
 
             if risk == "High":
+
                 st.error("🔴 High Risk Level")
+
                 st.markdown("""
                 ### Immediate Action Plan:
                 - Increase study hours to at least 3–4 hours daily
@@ -296,10 +337,13 @@ else:
                 - Revise previous semester fundamentals
                 - Practice mock tests weekly
                 """)
+
                 st.warning("You can turn this around. Consistency matters more than intensity.")
 
             elif risk == "Medium":
+
                 st.warning("🟡 Medium Risk Level")
+
                 st.markdown("""
                 ### Keep Improving:
                 - Maintain daily study schedule
@@ -307,10 +351,13 @@ else:
                 - Increase classroom participation
                 - Revise topics before exams
                 """)
+
                 st.info("You're close to Low Risk. Small improvements will make a big difference.")
 
             else:
+
                 st.success("🟢 Low Risk Level")
+
                 st.markdown("""
                 ### Performance Boost Plan:
                 - Try advanced practice problems
@@ -318,6 +365,7 @@ else:
                 - Help peers to strengthen concepts
                 - Start working on real-world projects
                 """)
+
                 st.info("Excellent performance. Now focus on mastering concepts deeply.")
 
         else:
